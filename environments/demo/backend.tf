@@ -3,11 +3,13 @@ terraform {
   # separate state key so this layer's lifecycle is independent.
   # DO NOT change the bucket — see Rules of Engagement in README.md.
   backend "s3" {
-    bucket       = "ai-demo-stack-tfstate"
-    key          = "demo/aiops.tfstate"
-    region       = "us-east-1"
-    encrypt      = true
-    use_lockfile = true
+    bucket  = "ai-demo-stack-tfstate"
+    key     = "demo/aiops.tfstate"
+    region  = "us-east-1"
+    encrypt = true
+    # No state locking: use_lockfile needs TF >= 1.10 (workstation runs
+    # 1.8.x) and there is no DynamoDB lock table. Single-operator demo —
+    # acceptable; revisit if the team grows.
   }
 
   required_version = ">= 1.6.0"
