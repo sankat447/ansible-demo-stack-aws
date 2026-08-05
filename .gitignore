@@ -1,0 +1,38 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.lock.hcl.backup
+
+# Sensitive tfvars (committed tfvars must contain no secrets)
+*.auto.tfvars
+secrets.tfvars
+
+# Ansible
+*.retry
+.ansible/
+
+# Python / Jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Deploy logs and scratch
+logs/
+*.log
+.deploy-state/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
