@@ -79,3 +79,12 @@ These are baked into this repo's day-1 code — do not re-learn them.
 - **A9 (carried forward as L19) — `|| true` after tee pipelines** is
   applied throughout deploy.sh/destroy.sh, with `PIPESTATUS[0]`
   checked explicitly where the terraform/ansible exit code matters.
+- **A10 — `|| true` RESETS PIPESTATUS.** Hit on the very first deploy:
+  `pipeline || true` followed by `[[ ${PIPESTATUS[0]} -eq 0 ]]` reads
+  the exit code of `true`, so a failed `terraform init` sailed through
+  and the script hunted a nonexistent InstallPlan. Correct pattern:
+  capture inside the `||` right-hand side, where PIPESTATUS still
+  belongs to the pipeline — `pipeline || rc="${PIPESTATUS[0]}"` (see
+  `run_logged()` in deploy.sh). Also: always `terraform init
+  -reconfigure` in scripts — a stray local `init -backend=false` (e.g.
+  from offline validation) otherwise wedges the backend.

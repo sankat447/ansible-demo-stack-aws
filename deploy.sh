@@ -27,6 +27,17 @@ confirm() {
   [[ "$ans" == "y" || "$ans" == "Y" ]]
 }
 
+# Run a noisy command: full output to a log, filtered lines to the
+# console, REAL exit code preserved. NB: a trailing `|| true` resets
+# PIPESTATUS — the code must be captured in the `||` RHS itself, where
+# PIPESTATUS still belongs to the pipeline (lesson L19, refined as A10).
+run_logged() { # <logfile> <console-filter-regex> <cmd...>
+  local log="$1" filter="$2" rc=0
+  shift 2
+  "$@" 2>&1 | tee "$log" | grep -E "$filter" || rc="${PIPESTATUS[0]}"
+  return "$rc"
+}
+
 oc_aap() { oc -n aap "$@"; }
 
 # ───────────────────────────────────────────────────────────────────────
@@ -99,9 +110,14 @@ confirm "Deploy the AIOps layer onto $(oc whoami --show-server)?" || exit 0
 # ───────────────────────────────────────────────────────────────────────
 banner "Phase 1 — Terraform: DBs, namespaces, secrets, operator subscription"
 # ───────────────────────────────────────────────────────────────────────
-terraform -chdir="$TF_DIR" init -input=false 2>&1 | tee "$LOG_DIR/tf-init.log" | tail -3 || true
+# -reconfigure: converges even if a previous `init -backend=false`
+# (local validation) left a non-S3 backend behind.
+run_logged "$LOG_DIR/tf-init.log" 'Terraform has been|Initializing|Error' \
+  terraform -chdir="$TF_DIR" init -input=false -reconfigure \
+  || { echo "FATAL: terraform init failed — see $LOG_DIR/tf-init.log"; exit 1; }
 # Stage 1: everything EXCEPT the AAP CRs (their CRDs don't exist yet).
-terraform -chdir="$TF_DIR" apply -input=false -auto-approve \
+run_logged "$LOG_DIR/tf-stage1.log" '^(module\.|Apply|Plan|Error)' \
+  terraform -chdir="$TF_DIR" apply -input=false -auto-approve \
   -target=module.aurora_db \
   -target=module.collab \
   -target=module.event_sources \
@@ -111,8 +127,7 @@ terraform -chdir="$TF_DIR" apply -input=false -auto-approve \
   -target='module.aap.kubernetes_secret_v1.postgres_configuration' \
   -target=module.aap.kubectl_manifest.operator_group \
   -target=module.aap.kubectl_manifest.subscription \
-  2>&1 | tee "$LOG_DIR/tf-stage1.log" | grep -E '^(module\.|Apply|Plan|Error)' || true
-[[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "FATAL: terraform stage 1 failed — see $LOG_DIR/tf-stage1.log"; exit 1; }
+  || { echo "FATAL: terraform stage 1 failed — see $LOG_DIR/tf-stage1.log"; exit 1; }
 
 # ───────────────────────────────────────────────────────────────────────
 banner "Phase 2 — Approve the pinned InstallPlan, wait for the operator"
@@ -148,9 +163,9 @@ echo "OK: AAP operator installed"
 # ───────────────────────────────────────────────────────────────────────
 banner "Phase 3 — Terraform: AAP/EDA custom resources + Lightspeed"
 # ───────────────────────────────────────────────────────────────────────
-terraform -chdir="$TF_DIR" apply -input=false -auto-approve \
-  2>&1 | tee "$LOG_DIR/tf-stage2.log" | grep -E '^(module\.|Apply|Plan|Error)' || true
-[[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "FATAL: terraform stage 2 failed — see $LOG_DIR/tf-stage2.log"; exit 1; }
+run_logged "$LOG_DIR/tf-stage2.log" '^(module\.|Apply|Plan|Error)' \
+  terraform -chdir="$TF_DIR" apply -input=false -auto-approve \
+  || { echo "FATAL: terraform stage 2 failed — see $LOG_DIR/tf-stage2.log"; exit 1; }
 
 # ───────────────────────────────────────────────────────────────────────
 banner "Phase 4 — GitOps bootstrap (app-of-apps + notifications wiring)"
@@ -244,7 +259,8 @@ VECTOR_HOST="$(oc -n aiops-notebooks get secret aiops-vector-db -o jsonpath='{.d
 VECTOR_PASS="$(oc -n aiops-notebooks get secret aiops-vector-db -o jsonpath='{.data.PGPASSWORD}' | base64 -d)"
 
 # 6e. Controller + EDA configuration-as-code.
-ansible-playbook "$REPO_ROOT/playbooks/setup/seed-controller.yml" \
+run_logged "$LOG_DIR/seed.log" '^(TASK|PLAY|ok:|changed:|failed:|fatal:)' \
+  ansible-playbook "$REPO_ROOT/playbooks/setup/seed-controller.yml" \
   -e controller_host="$CONTROLLER_URL" \
   -e controller_username=admin \
   -e controller_password="$AAP_ADMIN_PW" \
@@ -254,8 +270,7 @@ ansible-playbook "$REPO_ROOT/playbooks/setup/seed-controller.yml" \
   -e mattermost_webhook_url="$MM_WEBHOOK_URL" \
   -e openshift_sa_token="$SA_TOKEN" \
   -e '{"vector_db": {"host": "'"$VECTOR_HOST"'", "database": "aiops", "username": "aiops_app", "password": "'"$VECTOR_PASS"'"}}' \
-  2>&1 | tee "$LOG_DIR/seed.log" | grep -E '^(TASK|PLAY|ok:|changed:|failed:|fatal:)' || true
-[[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "FATAL: seeding failed — see $LOG_DIR/seed.log"; exit 1; }
+  || { echo "FATAL: seeding failed — see $LOG_DIR/seed.log"; exit 1; }
 
 # 6f. Optional: Keycloak SSO federation (needs the base IdP admin creds).
 # Interactive-only: the hidden password read is meaningless under `yes y |`.

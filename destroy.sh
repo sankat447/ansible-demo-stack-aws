@@ -108,10 +108,15 @@ fi
 # ───────────────────────────────────────────────────────────────────────
 banner "Phase 3 — Terraform destroy (operators, CRs, namespaces, secrets)"
 # ───────────────────────────────────────────────────────────────────────
-terraform -chdir="$TF_DIR" init -input=false 2>&1 | tail -2 || true
+# NB: capture the exit code in the `||` RHS — a bare `|| true` resets
+# PIPESTATUS (lesson A10).
+rc=0
+terraform -chdir="$TF_DIR" init -input=false -reconfigure 2>&1 | tail -2 || rc="${PIPESTATUS[0]}"
+[[ "$rc" -eq 0 ]] || { echo "FATAL: terraform init failed"; exit 1; }
+rc=0
 terraform -chdir="$TF_DIR" destroy -input=false -auto-approve \
-  2>&1 | tee "$LOG_DIR/tf-destroy.log" | grep -E '^(module\.|Destroy|Plan|Error)' || true
-[[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "FATAL: terraform destroy failed — see $LOG_DIR/tf-destroy.log"; exit 1; }
+  2>&1 | tee "$LOG_DIR/tf-destroy.log" | grep -E '^(module\.|Destroy|Plan|Error)' || rc="${PIPESTATUS[0]}"
+[[ "$rc" -eq 0 ]] || { echo "FATAL: terraform destroy failed — see $LOG_DIR/tf-destroy.log"; exit 1; }
 
 # CSV/InstallPlans are OLM-owned children of the Subscription and can
 # linger; the namespaces are TF-deleted which clears them. Sanity only:
