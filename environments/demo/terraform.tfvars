@@ -5,6 +5,9 @@
 aws_region          = "us-east-1"
 cluster_apps_domain = "apps.ai-demo.iisdemolab.click"
 
+# Verified against RDS: aws rds describe-db-clusters → MasterUsername
+aurora_master_username = "rhoai_admin"
+
 # Q5: self-hosted llama-3-1-8b via Portkey (set to "redhat" + provide
 # TF_VAR_lightspeed_api_key to use the Red Hat Content Provider).
 lightspeed_provider = "portkey"
