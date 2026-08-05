@@ -59,9 +59,13 @@ banner "Phase 0.3 — Red Hat SSO"
 if command -v rosa >/dev/null; then
   if rosa whoami >/dev/null 2>&1; then
     echo "OK: Red Hat session active"
-  else
+  elif [ -t 0 ]; then
     echo "No Red Hat session — 'rosa login' (may open a browser)..."
     rosa login || echo "WARN: rosa login failed — operator catalog access may already suffice"
+  else
+    # Non-interactive (yes y | ...): rosa login would eat piped stdin.
+    echo "WARN: no Red Hat session and stdin is not a tty — skipping rosa login."
+    echo "      The cluster's pull secret already grants catalog access; run 'rosa login' manually if needed."
   fi
 fi
 
@@ -254,7 +258,8 @@ ansible-playbook "$REPO_ROOT/playbooks/setup/seed-controller.yml" \
 [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "FATAL: seeding failed — see $LOG_DIR/seed.log"; exit 1; }
 
 # 6f. Optional: Keycloak SSO federation (needs the base IdP admin creds).
-if confirm "Wire Keycloak SSO now (requires Keycloak admin password)?"; then
+# Interactive-only: the hidden password read is meaningless under `yes y |`.
+if [ -t 0 ] && confirm "Wire Keycloak SSO now (requires Keycloak admin password)?"; then
   read -r -s -p "Keycloak admin password: " KC_PW; echo ""
   ansible-playbook "$REPO_ROOT/playbooks/setup/keycloak-oidc.yml" \
     -e keycloak_url="https://keycloak-rhoai-sso.$APPS_DOMAIN" \

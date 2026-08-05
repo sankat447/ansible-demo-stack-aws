@@ -67,7 +67,7 @@ variable "aap_channel" {
 variable "aap_starting_csv" {
   description = "Exact CSV to install. Pin for reproducibility; discover with: oc get packagemanifest ansible-automation-platform-operator -o jsonpath='{.status.channels[?(@.name==\"stable-2.5\")].currentCSV}'"
   type        = string
-  default     = "aap-operator.v2.5.0-0.1728520175"
+  default     = "aap-operator.v2.5.0-0.1761050204" # verified against this cluster's packagemanifest 2026-08-05
 }
 
 variable "aap_admin_password" {
