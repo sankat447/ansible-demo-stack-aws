@@ -8,10 +8,12 @@
 # which this nginx proxy forwards to either:
 #   - portkey: the base stack's Portkey gateway → self-hosted
 #     llama-3-1-8b (Q5 default; satisfies lesson L4 — no direct vLLM), or
-#   - redhat:  the Red Hat Content Provider API, adding the bearer key
-#     from a Secret (lesson L5 — the key never lands in a ConfigMap).
+#   - redhat:  the Red Hat Content Provider API, adding the bearer key.
 #
-# Switching backends is a tfvars change; no playbook changes.
+# The full nginx config is rendered by Terraform and mounted as a
+# Secret (it embeds the bearer key — lesson L5). No envsubst/startup
+# templating: the UBI s2i nginx image includes nginx.default.d/*.conf
+# inside its default :8080 server block, so this is location blocks only.
 
 terraform {
   required_providers {
@@ -21,37 +23,23 @@ terraform {
 
 locals {
   upstream = var.provider_choice == "redhat" ? var.redhat_endpoint : var.portkey_endpoint
+  api_key  = var.provider_choice == "redhat" ? var.api_key : "portkey-self-hosted"
 
-  nginx_conf_template = <<-CONF
-    server {
-      listen 8080;
+  nginx_conf = <<-CONF
+    location /healthz {
+      return 200 'ok';
+    }
 
-      location /healthz {
-        return 200 'ok';
-      }
-
-      location / {
-        proxy_pass $${LS_UPSTREAM};
-        proxy_ssl_server_name on;
-        proxy_set_header Authorization "Bearer $${LS_API_KEY}";
-        # Portkey routing hint — ignored by the Red Hat endpoint.
-        proxy_set_header x-portkey-model "$${LS_MODEL}";
-        proxy_read_timeout 300s;   # LLM generations are slow
-        proxy_send_timeout 300s;
-      }
+    location / {
+      proxy_pass ${local.upstream};
+      proxy_ssl_server_name on;
+      proxy_set_header Authorization "Bearer ${local.api_key}";
+      # Portkey routing hint — ignored by the Red Hat endpoint.
+      proxy_set_header x-portkey-model "${var.model_name}";
+      proxy_read_timeout 300s;   # LLM generations are slow
+      proxy_send_timeout 300s;
     }
   CONF
-}
-
-resource "kubernetes_config_map_v1" "proxy_template" {
-  metadata {
-    name      = "lightspeed-proxy-template"
-    namespace = var.namespace
-    labels    = { app = "lightspeed" }
-  }
-  data = {
-    "lightspeed.conf.template" = local.nginx_conf_template
-  }
 }
 
 resource "kubernetes_secret_v1" "config" {
@@ -61,12 +49,7 @@ resource "kubernetes_secret_v1" "config" {
     labels    = { app = "lightspeed" }
   }
   data = {
-    LS_UPSTREAM = local.upstream
-    LS_MODEL    = var.model_name
-    # Portkey mode needs no key; keep a harmless placeholder so the
-    # header render never emits an empty Bearer.
-    LS_API_KEY = var.provider_choice == "redhat" ? var.api_key : "portkey-self-hosted"
-    PROVIDER   = var.provider_choice
+    "lightspeed.conf" = local.nginx_conf
   }
 }
 
@@ -87,7 +70,7 @@ resource "kubernetes_deployment_v1" "proxy" {
         labels = { app = "lightspeed" }
         annotations = {
           # Restart on backend switch.
-          "checksum/config" = sha256(jsonencode(kubernetes_secret_v1.config.data))
+          "checksum/config" = sha256(local.nginx_conf)
           # Lesson L2: harmless outside the mesh, saves a debugging day inside it.
           "maistra.io/expose-route" = "true"
         }
@@ -96,24 +79,14 @@ resource "kubernetes_deployment_v1" "proxy" {
         container {
           name  = "nginx"
           image = var.proxy_image
-          command = ["/bin/sh", "-c", <<-SH
-            envsubst '$${LS_UPSTREAM} $${LS_API_KEY} $${LS_MODEL}' \
-              < /tmpl/lightspeed.conf.template \
-              > /opt/app-root/etc/nginx.default.d/lightspeed.conf \
-            && exec nginx -g 'daemon off;'
-          SH
-          ]
-          env_from {
-            secret_ref {
-              name = kubernetes_secret_v1.config.metadata[0].name
-            }
-          }
           port {
             container_port = 8080
           }
           volume_mount {
-            name       = "tmpl"
-            mount_path = "/tmpl"
+            name       = "conf"
+            mount_path = "/opt/app-root/etc/nginx.default.d/lightspeed.conf"
+            sub_path   = "lightspeed.conf"
+            read_only  = true
           }
           readiness_probe {
             http_get {
@@ -124,13 +97,18 @@ resource "kubernetes_deployment_v1" "proxy" {
           }
         }
         volume {
-          name = "tmpl"
-          config_map {
-            name = kubernetes_config_map_v1.proxy_template.metadata[0].name
+          name = "conf"
+          secret {
+            secret_name = kubernetes_secret_v1.config.metadata[0].name
           }
         }
       }
     }
+  }
+
+  timeouts {
+    create = "5m"
+    update = "5m"
   }
 }
 
