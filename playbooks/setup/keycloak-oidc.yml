@@ -1,0 +1,55 @@
+---
+# Keycloak-federated auth for AAP (Q4/#1 requirement — reuse the base
+# stack's IdP in rhoai-sso). Creates the OIDC client in the existing
+# realm and wires controller social auth. Run by deploy.sh phase 5.
+#
+# Required extra vars:
+#   keycloak_url            e.g. https://keycloak-rhoai-sso.apps.ai-demo.iisdemolab.click
+#   keycloak_admin_user / keycloak_admin_password
+#   keycloak_realm          (default: ai-demo)
+#   controller_host / controller_username / controller_password
+- name: Federate AAP auth with the existing Keycloak
+  hosts: localhost
+  gather_facts: false
+  vars:
+    keycloak_realm: ai-demo
+    client_id: aap-controller
+  tasks:
+    - name: Generate a client secret
+      ansible.builtin.set_fact:
+        client_secret: "{{ lookup('ansible.builtin.password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+    - name: Create/refresh the OIDC client
+      community.general.keycloak_client:
+        auth_keycloak_url: "{{ keycloak_url }}"
+        auth_realm: master
+        auth_username: "{{ keycloak_admin_user }}"
+        auth_password: "{{ keycloak_admin_password }}"
+        validate_certs: false
+        realm: "{{ keycloak_realm }}"
+        client_id: "{{ client_id }}"
+        secret: "{{ client_secret }}"
+        protocol: openid-connect
+        public_client: false
+        standard_flow_enabled: true
+        redirect_uris:
+          - "{{ controller_host }}/sso/complete/oidc/"
+        state: present
+
+    - name: Configure controller OIDC settings
+      ansible.controller.settings:
+        controller_host: "{{ controller_host }}"
+        controller_username: "{{ controller_username }}"
+        controller_password: "{{ controller_password }}"
+        validate_certs: false
+        settings:
+          SOCIAL_AUTH_OIDC_KEY: "{{ client_id }}"
+          SOCIAL_AUTH_OIDC_SECRET: "{{ client_secret }}"
+          SOCIAL_AUTH_OIDC_OIDC_ENDPOINT: "{{ keycloak_url }}/realms/{{ keycloak_realm }}"
+          SOCIAL_AUTH_OIDC_VERIFY_SSL: false
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: >-
+          Keycloak SSO wired: 'Sign in with OIDC' now appears on the AAP
+          login page. Local admin remains available as break-glass.

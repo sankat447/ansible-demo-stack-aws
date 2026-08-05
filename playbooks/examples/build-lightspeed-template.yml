@@ -1,0 +1,44 @@
+---
+# ⚙️ Build Ansible Lightspeed Job Template — workflow node 4 (Log Enrichment).
+# Creates/updates the 🧠 generator template with the AI-drafted prompt as
+# a SURVEY DEFAULT — the human-in-the-loop checkpoint: the operator sees
+# the prompt at launch and can correct it before generation (the lab's
+# "natural stopping point").
+- name: Build the Lightspeed generator job template
+  hosts: localhost
+  gather_facts: false
+  vars:
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
+    controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') }}"
+  module_defaults:
+    group/ansible.controller.controller:
+      host: "{{ controller_host }}"
+      username: "{{ controller_username }}"
+      password: "{{ controller_password }}"
+      validate_certs: false
+  tasks:
+    - name: Create/update the generator template with the drafted prompt
+      ansible.controller.job_template:
+        name: "🧠 Lightspeed Remediation Playbook Generator"
+        organization: AIOps
+        project: aiops-content
+        playbook: playbooks/examples/generate-playbook-lightspeed.yml
+        inventory: aiops-localhost
+        credentials:
+          - aiops-gitea
+        extra_vars:
+          incident_namespace: "{{ incident_namespace | default('aiops-demo-app') }}"
+          incident_subject: "{{ incident_subject | default('demo-httpd') }}"
+          incident_rca: "{{ incident_rca | default('') }}"
+        survey_enabled: true
+        survey_spec:
+          name: Review the generation prompt
+          description: Human-in-the-loop checkpoint before Lightspeed generates the fix.
+          spec:
+            - type: textarea
+              question_name: "Lightspeed generation prompt (review & correct)"
+              variable: lightspeed_prompt
+              required: true
+              default: "{{ lightspeed_prompt | default('Fix the failed Apache service') }}"
+        state: present

@@ -1,0 +1,29 @@
+---
+# Delivery events: ArgoCD notifications → event-bridge → Kafka
+# `aiops.argocd`. Demos EDA reacting to GitOps state, not just runtime.
+- name: React to ArgoCD app-status changes
+  hosts: all
+  sources:
+    - ansible.eda.kafka:
+        host: kafka.aiops-events.svc
+        port: 9092
+        topic: aiops.argocd
+
+  rules:
+    - name: Application degraded or sync failed
+      condition: >-
+        event.app is defined and
+        (event.state == "degraded" or event.state == "sync-failed")
+      throttle:
+        once_within: 10 minutes
+        group_by_attributes:
+          - event.app
+      action:
+        run_job_template:
+          name: "gitops-drift-report"
+          organization: AIOps
+          job_args:
+            extra_vars:
+              argocd_app: "{{ event.app }}"
+              argocd_state: "{{ event.state }}"
+              argocd_message: "{{ event.message | default('') }}"

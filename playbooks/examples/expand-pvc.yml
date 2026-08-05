@@ -1,0 +1,70 @@
+---
+# UC-2: PVC filling up. Guardrails: SC must allow expansion, growth is
+# +50% capped at 2× current. Lesson L3: NEVER mutate the StorageClass.
+- name: Expand a filling PVC
+  hosts: localhost
+  gather_facts: false
+  vars:
+    growth_factor: 1.5
+  tasks:
+    - name: Get the PVC
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        name: "{{ target_pvc }}"
+        namespace: "{{ target_namespace }}"
+      register: pvc
+
+    - name: Get its StorageClass
+      kubernetes.core.k8s_info:
+        kind: StorageClass
+        name: "{{ pvc.resources[0].spec.storageClassName }}"
+      register: sc
+
+    - name: Guardrails
+      ansible.builtin.assert:
+        that:
+          - sc.resources[0].allowVolumeExpansion | default(false)
+        fail_msg: >-
+          StorageClass {{ pvc.resources[0].spec.storageClassName }} does not
+          allow expansion. Do NOT modify it (lesson L3) — create a new SC and
+          migrate, or escalate.
+
+    - name: Compute new size (+50%, whole Gi)
+      ansible.builtin.set_fact:
+        new_size: "{{ ((pvc.resources[0].status.capacity.storage | human_to_bytes)
+                       * growth_factor / 1073741824) | round(0, 'ceil') | int }}Gi"
+
+    - name: Patch the claim
+      kubernetes.core.k8s:
+        state: patched
+        kind: PersistentVolumeClaim
+        name: "{{ target_pvc }}"
+        namespace: "{{ target_namespace }}"
+        definition:
+          spec:
+            resources:
+              requests:
+                storage: "{{ new_size }}"
+
+    - name: Wait for the resize to complete
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        name: "{{ target_pvc }}"
+        namespace: "{{ target_namespace }}"
+      register: resized
+      until: >-
+        resized.resources[0].status.capacity.storage == new_size or
+        (resized.resources[0].status.conditions | default([])
+         | selectattr('type', 'equalto', 'FileSystemResizePending') | list | length) == 0
+      retries: 30
+      delay: 10
+
+    - name: Publish outcome
+      ansible.builtin.set_stats:
+        data:
+          incident_kind: KubePersistentVolumeFillingUp
+          incident_namespace: "{{ target_namespace }}"
+          incident_subject: "{{ target_pvc }}"
+          remediation_action: "expand-to-{{ new_size }}"
+          remediation_outcome: success
+        per_host: false

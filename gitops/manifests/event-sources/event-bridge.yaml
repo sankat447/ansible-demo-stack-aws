@@ -1,0 +1,108 @@
+# event-bridge — the webhook receiver in front of Kafka.
+#
+#   Alertmanager  ── POST /alerts ──┐
+#                                   ├──► Vector ──► Kafka topics
+#   ArgoCD notif. ── POST /argocd ──┘        (aiops.alerts / aiops.argocd)
+#
+# EDA rulebooks consume the Kafka topics; nothing ever has to target an
+# EDA activation pod directly (their labels/Services are operator
+# implementation details — see LESSONS_LEARNED A3).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: event-bridge-config
+  namespace: aiops-events
+  labels:
+    app: event-bridge
+data:
+  vector.yaml: |
+    sources:
+      alertmanager:
+        type: http_server
+        address: 0.0.0.0:8687
+        path: /alerts
+        decoding:
+          codec: json
+      argocd:
+        type: http_server
+        address: 0.0.0.0:8688
+        path: /argocd
+        decoding:
+          codec: json
+    sinks:
+      kafka_alerts:
+        type: kafka
+        inputs: [alertmanager]
+        bootstrap_servers: kafka.aiops-events.svc:9092
+        topic: aiops.alerts
+        encoding:
+          codec: json
+      kafka_argocd:
+        type: kafka
+        inputs: [argocd]
+        bootstrap_servers: kafka.aiops-events.svc:9092
+        topic: aiops.argocd
+        encoding:
+          codec: json
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-bridge
+  namespace: aiops-events
+  labels:
+    app: event-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: event-bridge
+  template:
+    metadata:
+      labels:
+        app: event-bridge
+      annotations:
+        maistra.io/expose-route: "true" # lesson L2
+    spec:
+      containers:
+        - name: vector
+          # Runs fine under OpenShift's random UID — no anyuid needed.
+          image: timberio/vector:0.40.0-alpine
+          args: ["--config", "/etc/vector/vector.yaml"]
+          ports:
+            - containerPort: 8687
+              name: alerts
+            - containerPort: 8688
+              name: argocd
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: event-bridge-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-bridge
+  namespace: aiops-events
+  labels:
+    app: event-bridge
+spec:
+  selector:
+    app: event-bridge
+  ports:
+    - name: alerts
+      port: 8687
+      targetPort: 8687
+    - name: argocd
+      port: 8688
+      targetPort: 8688

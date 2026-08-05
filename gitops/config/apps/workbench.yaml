@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aiops-workbench
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: aiops
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-failed.aiops-event-bridge: ""
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sankat447/ansible-demo-stack-aws.git
+    targetRevision: main
+    path: gitops/manifests/workbench
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: aiops-notebooks
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 3m }

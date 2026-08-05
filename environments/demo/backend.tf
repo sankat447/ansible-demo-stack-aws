@@ -21,13 +21,15 @@ terraform {
       source  = "hashicorp/kubernetes"
       version = "~> 2.31"
     }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.13"
+    # kubectl applies raw YAML at apply-time, so CRs whose CRDs are
+    # installed mid-apply (AutomationController etc.) don't fail at plan.
+    kubectl = {
+      source  = "gavinbunney/kubectl"
+      version = "~> 1.14"
     }
-    postgresql = {
-      source  = "cyrilgdn/postgresql"
-      version = "~> 1.22"
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
     }
   }
 }

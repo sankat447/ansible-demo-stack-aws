@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aiops-demo-app
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: aiops
+  annotations:
+    # The demo breaks this app on purpose — degraded health is the show.
+    notifications.argoproj.io/subscribe.on-health-degraded.aiops-event-bridge: ""
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sankat447/ansible-demo-stack-aws.git
+    targetRevision: main
+    path: gitops/manifests/demo-app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: aiops-demo-app
+  syncPolicy:
+    automated:
+      prune: true
+      # NO selfHeal: the ❌ Break Apache playbook edits the ConfigMap
+      # in-cluster; selfHeal would instantly revert the demo's premise.
+      # The Lightspeed-generated fix restores it instead.
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 3m }

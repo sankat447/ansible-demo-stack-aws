@@ -1,0 +1,97 @@
+# AIOps workbench on the EXISTING RHOAI install (never reinstall RHOAI).
+# The notebook pulls alerts + pod events, embeds them into pgvector
+# (Aurora `aiops` DB), retrieves similar past incidents, and drafts
+# incident summaries via Portkey. See notebooks/ in this repo.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-notebook
+  namespace: aiops-notebooks
+---
+# Read-only monitoring access so the notebook can query Thanos.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-notebook-monitoring-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: aiops-notebook
+    namespace: aiops-notebooks
+---
+# Read events/pods across the demo namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-notebook-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: aiops-notebook
+    namespace: aiops-notebooks
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aiops-workbench-data
+  namespace: aiops-notebooks
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: gp3-csi
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: kubeflow.org/v1
+kind: Notebook
+metadata:
+  name: aiops-workbench
+  namespace: aiops-notebooks
+  labels:
+    app: aiops-workbench
+    opendatahub.io/dashboard: "true"
+  annotations:
+    openshift.io/display-name: AIOps Workbench
+    openshift.io/description: >-
+      Incident understanding: embeds alerts + events into pgvector,
+      retrieves precedent, drafts NL summaries via Portkey.
+    notebooks.opendatahub.io/inject-oauth: "true"
+    opendatahub.io/username: admin
+spec:
+  template:
+    spec:
+      serviceAccountName: aiops-notebook
+      containers:
+        - name: aiops-workbench
+          # Standard RHOAI data-science image from the base install's
+          # imagestreams (no external registry dependency).
+          image: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/s2i-generic-data-science-notebook:2024.1
+          env:
+            - name: JUPYTER_NOTEBOOK_PORT
+              value: "8888"
+          envFrom:
+            - secretRef:
+                name: aiops-vector-db
+            - configMapRef:
+                name: aiops-notebook-env
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /opt/app-root/src
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: aiops-workbench-data

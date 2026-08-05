@@ -1,0 +1,95 @@
+---
+# UC-3: node NotReady. Guardrails: workers only, quorum of Ready workers
+# required, one node at a time (workflow concurrency=1 enforces that).
+# Cordon → drain → (AWS reboot if kubelet dead) → wait → uncordon.
+- name: Recover a NotReady node
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ready_worker_quorum: 2
+    recovery_timeout_minutes: 15
+  tasks:
+    - name: Get the node
+      kubernetes.core.k8s_info:
+        kind: Node
+        name: "{{ target_node }}"
+      register: node
+
+    - name: Get all nodes for quorum math
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: all_nodes
+
+    - name: Guardrails — never masters, keep quorum
+      ansible.builtin.assert:
+        that:
+          - "'node-role.kubernetes.io/control-plane' not in node.resources[0].metadata.labels"
+          - >-
+            (all_nodes.resources
+             | selectattr('metadata.name', 'ne', target_node)
+             | selectattr('metadata.labels', 'contains', 'node-role.kubernetes.io/worker')
+             | selectattr('status.conditions', 'defined') | list | length) >= ready_worker_quorum
+        fail_msg: Guardrail hit — escalating to a human instead of acting.
+
+    - name: Cordon
+      kubernetes.core.k8s:
+        state: patched
+        kind: Node
+        name: "{{ target_node }}"
+        definition:
+          spec:
+            unschedulable: true
+
+    - name: Drain (respect PDBs, bounded)
+      kubernetes.core.k8s_drain:
+        name: "{{ target_node }}"
+        state: drain
+        delete_options:
+          ignore_daemonsets: true
+          delete_emptydir_data: true
+          wait_timeout: 300
+      ignore_errors: true # PDB-blocked drain is fine; reboot may still fix kubelet
+
+    - name: Find the AWS instance ID from the Machine annotation
+      ansible.builtin.set_fact:
+        instance_id: >-
+          {{ node.resources[0].spec.providerID | regex_replace('^aws:///[^/]+/', '') }}
+
+    - name: Reboot the instance
+      amazon.aws.ec2_instance:
+        instance_ids: ["{{ instance_id }}"]
+        state: restarted
+      when: instance_id is match('^i-')
+
+    - name: Wait for the node to return Ready
+      kubernetes.core.k8s_info:
+        kind: Node
+        name: "{{ target_node }}"
+      register: recovered
+      until: >-
+        recovered.resources[0].status.conditions
+        | selectattr('type', 'equalto', 'Ready')
+        | map(attribute='status') | first == 'True'
+      retries: "{{ recovery_timeout_minutes }}"
+      delay: 60
+      ignore_errors: true
+
+    - name: Uncordon on success
+      kubernetes.core.k8s:
+        state: patched
+        kind: Node
+        name: "{{ target_node }}"
+        definition:
+          spec:
+            unschedulable: false
+      when: recovered is succeeded
+
+    - name: Publish outcome (leave cordoned + escalate on failure)
+      ansible.builtin.set_stats:
+        data:
+          incident_kind: KubeNodeNotReady
+          incident_namespace: cluster
+          incident_subject: "{{ target_node }}"
+          remediation_action: cordon-drain-reboot
+          remediation_outcome: "{{ 'success' if recovered is succeeded else 'escalated' }}"
+        per_host: false

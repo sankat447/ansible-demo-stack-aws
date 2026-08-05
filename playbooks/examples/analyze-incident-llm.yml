@@ -1,0 +1,52 @@
+---
+# 🤖 AI: Analyze Incident — workflow node 2 (Log Enrichment).
+# Sends failure logs to the self-hosted llama-3-1-8b. The call goes to
+# the lightspeed service, which fronts Portkey — NEVER direct to vLLM
+# (lesson L4). Lab parity: the RHEL AI Granite '/v1/completions' step.
+- name: Analyze incident logs with the self-hosted LLM
+  hosts: localhost
+  gather_facts: false
+  vars:
+    llm_endpoint: "{{ lightspeed_endpoint | default('http://lightspeed.aap.svc:8080') }}"
+    llm_model: "{{ llm_model_name | default('llama-3-1-8b') }}"
+  tasks:
+    - name: Request root-cause analysis
+      ansible.builtin.uri:
+        url: "{{ llm_endpoint }}/v1/chat/completions"
+        method: POST
+        body_format: json
+        timeout: 300
+        body:
+          model: "{{ llm_model }}"
+          max_tokens: 600
+          messages:
+            - role: system
+              content: >-
+                You are an SRE assistant. Analyze the service failure logs.
+                Reply with: ROOT CAUSE (one paragraph), EVIDENCE (quoted log
+                lines), and REMEDIATION INSTRUCTION (a single imperative
+                sentence suitable as an Ansible Lightspeed generation prompt,
+                e.g. 'Remove the invalid directive from the Apache
+                configuration and restart the service').
+            - role: user
+              content: |
+                Service: {{ incident_subject | default('demo-httpd') }}
+                Namespace: {{ incident_namespace | default('aiops-demo-app') }}
+                Failure logs:
+                {{ failure_logs | default(incident_log) | truncate(6000) }}
+      register: llm_response
+
+    - name: Extract RCA and the generation prompt
+      ansible.builtin.set_fact:
+        incident_rca: "{{ llm_response.json.choices[0].message.content }}"
+
+    - name: Publish RCA to downstream nodes
+      ansible.builtin.set_stats:
+        data:
+          incident_rca: "{{ incident_rca }}"
+          # The remediation instruction becomes the Lightspeed prompt;
+          # a human reviews it at the survey checkpoint.
+          lightspeed_prompt: >-
+            {{ (incident_rca.split('REMEDIATION INSTRUCTION')[-1])
+               | regex_replace('^[:\\s]+', '') | trim }}
+        per_host: false

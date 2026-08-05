@@ -1,0 +1,120 @@
+# Mattermost Team Edition — incident notifications (lab parity: Town
+# Square channel receives 🛑 error logs and 🧠 AI RCA).
+# DSN comes from the Terraform-created `mattermost-db` Secret
+# (logical DB `mattermost` in the existing Aurora — no new cluster).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mattermost
+  namespace: aiops-collab
+---
+# Lesson L1: the image pins UID 2000.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mattermost-anyuid
+  namespace: aiops-collab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+subjects:
+  - kind: ServiceAccount
+    name: mattermost
+    namespace: aiops-collab
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mattermost
+  namespace: aiops-collab
+  labels:
+    app: mattermost
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mattermost
+  template:
+    metadata:
+      labels:
+        app: mattermost
+      annotations:
+        maistra.io/expose-route: "true" # lesson L2
+    spec:
+      serviceAccountName: mattermost
+      containers:
+        - name: mattermost
+          # TODO first deploy: pin by digest (LESSONS_LEARNED A2)
+          image: docker.io/mattermost/mattermost-team-edition:9.11.2
+          env:
+            - name: MM_SERVICESETTINGS_SITEURL
+              value: https://mattermost-aiops-collab.apps.ai-demo.iisdemolab.click
+            - name: MM_SQLSETTINGS_DRIVERNAME
+              value: postgres
+            - name: MM_SERVICESETTINGS_ENABLELOCALMODE
+              value: "true" # mmctl for the seed job
+            - name: MM_PLUGINSETTINGS_ENABLED
+              value: "false"
+          envFrom:
+            - secretRef:
+                name: mattermost-db # MM_SQLSETTINGS_DATASOURCE
+          ports:
+            - containerPort: 8065
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /mattermost/data
+            - name: mmctl-socket
+              mountPath: /var/tmp
+          readinessProbe:
+            httpGet:
+              path: /api/v4/system/ping
+              port: 8065
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          emptyDir: {} # chat attachments are throwaway demo data
+        - name: mmctl-socket
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mattermost
+  namespace: aiops-collab
+  labels:
+    app: mattermost
+spec:
+  selector:
+    app: mattermost
+  ports:
+    - name: http
+      port: 8065
+      targetPort: 8065
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mattermost
+  namespace: aiops-collab
+  labels:
+    app: mattermost
+spec:
+  host: mattermost-aiops-collab.apps.ai-demo.iisdemolab.click
+  to:
+    kind: Service
+    name: mattermost
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

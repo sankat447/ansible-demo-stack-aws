@@ -1,8 +1,79 @@
 # AIOps Use Cases
 
-Three concrete flows the demo can show end-to-end. Each follows the same
-spine: **alert → EDA rulebook → AAP workflow → Lightspeed-assisted
-playbook → outcome embedded into pgvector**.
+This stack is built strictly to the objectives of the Red Hat showroom
+lab [AI-Driven Ansible Automation](https://rhpds.github.io/showroom-ai-driven-ansible-automation/modules/index.html):
+detect, analyze, and remediate application failures automatically —
+**without manual playbook creation** — on three pillars:
+**observability** (log collection), **inference** (AI analysis), and
+**automation** (self-healing response).
+
+UC-0 is the lab's canonical flow, adapted to this platform. UC-1..3 are
+OpenShift-native extensions built on the same spine: **event → EDA
+rulebook → AAP workflow → AI analysis → Lightspeed-generated playbook →
+git-committed fix → outcome embedded into pgvector**.
+
+---
+
+## UC-0: Broken web service — the canonical lab flow (self-healing, zero hand-written fix)
+
+The showroom scenario is an Apache (`httpd`) systemd failure on a RHEL
+webserver. Our adaptation runs `httpd` as a containerized demo workload
+(`demo-httpd` in namespace `aiops-demo-app`), with the same
+break-detect-analyze-generate-fix arc.
+
+**Trigger** — the **`❌ Break Apache`** AAP job template
+(`playbooks/examples/break-httpd.yml`) injects an invalid Apache config
+directive into the demo workload and restarts it. The container fails.
+
+**Observability** — a fluent-bit sidecar/shipper collects the error
+logs and publishes them to the Kafka topic **`aiops.demo.events`**
+(single-broker Kafka in `aiops-events`). This mirrors the lab's
+Filebeat → Kafka pipeline.
+
+**EDA rulebook** — `rulebooks/examples/kafka-httpd-failure.yml`
+- Source: `ansible.eda.kafka` on topic `aiops.demo.events`
+- Condition: message matches `httpd.service: Failed` / config error
+  signature
+- Action: launch AAP workflow **`🚨 Log Enrichment and Prompt
+  Generation`**
+
+**AAP workflow 1 — Log Enrichment and Prompt Generation** (mirrors lab
+module 1, four sequential nodes):
+1. **⚙️ Apache Service Status Check** — confirm the failure state,
+   capture service status + recent error logs.
+2. **🤖 AI: Analyze Incident** — send logs to the self-hosted
+   llama-3-1-8b via **Portkey** (`portkey.ai-demo.svc:8787`,
+   OpenAI-compatible — our stand-in for the lab's RHEL AI Granite
+   endpoint). Returns a root-cause analysis.
+3. **📣 Notify via Mattermost** — post 🛑 raw error logs and 🧠 AI RCA
+   to the Town Square channel of the in-cluster Mattermost
+   (`aiops-collab` namespace).
+4. **⚙️ Build Ansible Lightspeed Job Template** — turn the RCA into a
+   generation prompt and create/update the job template
+   **`🧠 Lightspeed Remediation Playbook Generator`**.
+
+**Human-in-the-loop checkpoint** — launching the generator surveys the
+AI-drafted prompt; the operator reviews/corrects it before generation.
+This is the lab's "natural stopping point" for validation.
+
+**AAP workflow 2 — Remediation** (mirrors lab module 2, four nodes):
+1. **🧠 Lightspeed Remediation Playbook Generator** — generates the fix
+   playbook from the reviewed prompt (Lightspeed backend = llama via
+   Portkey).
+2. **🧾 Commit Fix to Gitea** — pushes the generated playbook to the
+   in-cluster Gitea repo **`lightspeed-playbooks`**.
+3. **Lightspeed-Playbooks project sync** — AAP pulls the new commit.
+4. **⚙️ Build HTTPD Remediation Template** — creates
+   **`🔧✅ Execute HTTPD Remediation`**; operator launches it limited to
+   the demo workload.
+
+**Verification** — the demo workload returns to healthy
+(`oc get pods -n aiops-demo-app`, service responds 200). The lab's
+`systemctl status httpd` check becomes a readiness-probe/service check.
+
+**Learning loop (our extension)** — incident context, RCA, generated
+playbook, and outcome are embedded into pgvector by the RHOAI notebook
+pipeline, so the next similar failure retrieves this precedent.
 
 ---
 
@@ -123,12 +194,16 @@ asks Lightspeed for a plain-English "what changed and what broke"
 summary, and embeds it. This demos EDA reacting to *delivery* events,
 not just *runtime* events.
 
-## Demo script (10 minutes)
+## Demo script (15 minutes)
 
-1. `oc delete pod` on the demo app with a bad image → UC-1 fires live.
-2. Publish a simulated node event to Kafka → UC-3 fires without
+1. **UC-0 (the headline, ~8 min):** launch `❌ Break Apache` in AAP →
+   watch Mattermost receive 🛑 logs then 🧠 AI RCA → review the
+   Lightspeed prompt (human-in-the-loop) → generate → show the
+   committed playbook in Gitea → run `🔧✅ Execute HTTPD Remediation` →
+   demo app healthy again. No human wrote a single task.
+2. `oc delete pod` on the demo app with a bad image → UC-1 fires live
+   off the Alertmanager path.
+3. Publish a simulated node event to Kafka → UC-3 fires without
    touching a real node.
-3. Open the RHOAI workbench notebook → show the embedded incidents and
-   run the similarity search for the UC-1 alert.
-4. Open AAP → show the Lightspeed-generated suggestions in the job
-   artifacts and the playbook editor.
+4. Open the RHOAI workbench notebook → show the embedded incidents and
+   run the similarity search for the UC-0/UC-1 alerts.

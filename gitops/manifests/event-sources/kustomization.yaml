@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kafka.yaml
+  - event-bridge.yaml
+commonLabels:
+  app.kubernetes.io/part-of: aiops

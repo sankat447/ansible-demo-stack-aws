@@ -1,8 +1,25 @@
 # Architecture
 
 This layer adds four components on top of the existing
-`ai-demo-stack-aws` base platform. Nothing in the base is modified;
-every arrow into the base points at a service that already exists.
+`ai-demo-stack-aws` base platform, built strictly to the objectives of
+the Red Hat showroom lab
+[AI-Driven Ansible Automation](https://rhpds.github.io/showroom-ai-driven-ansible-automation/modules/index.html):
+**observability** (log collection → Kafka), **inference** (LLM log
+analysis + Lightspeed playbook generation), **automation** (AAP
+self-healing workflows). Nothing in the base is modified; every arrow
+into the base points at a service that already exists.
+
+Lab-parity mapping (showroom component → this stack):
+
+| Showroom lab | This stack |
+|--------------|-----------|
+| RHEL webserver + httpd (systemd) | `demo-httpd` containerized workload (`aiops-demo-app` ns) |
+| Filebeat → Kafka | fluent-bit log shipper → single-broker Kafka (`aiops-events` ns) |
+| RHEL AI (Granite, `/v1/completions`) | llama-3-1-8b via **Portkey** (`portkey.ai-demo.svc:8787`, OpenAI-compatible) |
+| Ansible Lightspeed | Lightspeed with self-hosted-model backend via Portkey |
+| Gitea (generated-playbook repo) | Gitea rootless in `aiops-collab` ns, repo `lightspeed-playbooks` |
+| Mattermost (Town Square notifications) | Mattermost Team Edition in `aiops-collab` ns, `mattermost` logical DB in Aurora |
+| AAP workflows (Log Enrichment / Remediation) | Same workflow shapes, seeded as configuration-as-code |
 
 ## Component diagram
 
@@ -14,9 +31,13 @@ flowchart TB
         EDA["EDA Controller<br/>3 rulebook activations"]
         LS["Ansible Lightspeed<br/>(llama-3-1-8b backend)"]
         WB["RHOAI AIOps Workbench<br/>(Jupyter, reuses installed RHOAI)"]
-        KAFKA["Kafka (single broker)<br/>demo event topic"]
+        KAFKA["Kafka (single broker)<br/>topic aiops.demo.events"]
         AMWH["Alertmanager webhook receiver"]
         ARGON["ArgoCD notifications config"]
+        DEMO["demo-httpd workload<br/>(aiops-demo-app)"]
+        FB["fluent-bit log shipper"]
+        GITEA["Gitea<br/>repo: lightspeed-playbooks"]
+        MM["Mattermost<br/>Town Square channel"]
     end
 
     subgraph BASE["BASE PLATFORM — ai-demo-stack-aws (read-only)"]
@@ -41,13 +62,24 @@ flowchart TB
     AAP -- "secrets (DB creds, admin pw)" --> VAULT
     AAP -- "playbook/EE artifacts" --> MINIO
 
+    %% Observability pillar (lab: Filebeat → Kafka)
+    DEMO -- "error logs" --> FB
+    FB -- "publish" --> KAFKA
+
     %% EDA wiring
     PROM -- "alert webhooks" --> AMWH
     AMWH --> EDA
     ARGO -- "app-status notifications" --> ARGON
     ARGON --> EDA
-    KAFKA -- "simulated demo events" --> EDA
-    EDA -- "launches job templates (API)" --> AAP
+    KAFKA -- "httpd failures + simulated events" --> EDA
+    EDA -- "launches workflows (API)" --> AAP
+
+    %% Lab collab loop
+    AAP -- "🛑 logs + 🧠 AI RCA" --> MM
+    AAP -- "commit generated playbook" --> GITEA
+    GITEA -- "project sync (git pull)" --> AAP
+    AAP -- "remediation run" --> DEMO
+    MM -- "postgres ('mattermost' DB)" --> AURORA
 
     %% Lightspeed wiring
     AAP -- "inline suggestions<br/>(playbook editor)" --> LS
@@ -64,27 +96,42 @@ flowchart TB
 
 ## End-to-end event flow
 
+The canonical flow (UC-0, mirrors showroom lab modules 1–2):
+
 ```mermaid
 sequenceDiagram
-    participant PROM as Prometheus/Alertmanager
+    participant APP as demo-httpd
+    participant KAFKA as fluent-bit → Kafka
     participant EDA as EDA Rulebook
-    participant AAP as AAP Workflow
-    participant LS as Lightspeed (via Portkey → llama-3-1-8b)
-    participant PB as Remediation Playbook
+    participant AAP as AAP Workflows
+    participant AI as llama-3-1-8b (via Portkey)
+    participant MM as Mattermost
+    participant GIT as Gitea (lightspeed-playbooks)
     participant PGV as pgvector (Aurora)
-    participant WB as RHOAI Notebook
 
-    PROM->>EDA: Alert webhook (e.g. KubePodCrashLooping)
-    EDA->>PGV: (optional) similarity lookup — seen before?
-    EDA->>AAP: Launch job template with alert payload
-    AAP->>LS: Request playbook suggestion with incident context
-    LS-->>AAP: Generated/assisted playbook tasks
-    AAP->>PB: Execute remediation
-    PB-->>AAP: Outcome (success/failure + logs)
-    AAP->>WB: Outcome forwarded (webhook/artifact)
-    WB->>PGV: Embed incident context + outcome
-    Note over PGV: Next similar alert retrieves this precedent
+    Note over APP: ❌ Break Apache job injects bad config
+    APP->>KAFKA: httpd.service failure logs
+    KAFKA->>EDA: message on aiops.demo.events
+    EDA->>AAP: launch 🚨 Log Enrichment & Prompt Generation
+    AAP->>AAP: ⚙️ Apache Service Status Check
+    AAP->>AI: 🤖 Analyze Incident (logs → RCA)
+    AI-->>AAP: root-cause analysis
+    AAP->>MM: 📣 🛑 error logs + 🧠 AI RCA → Town Square
+    AAP->>AAP: ⚙️ Build Lightspeed Job Template (prompt from RCA)
+    Note over AAP: 🧍 Human reviews/corrects the generated prompt
+    AAP->>AI: 🧠 Lightspeed generates remediation playbook
+    AAP->>GIT: 🧾 Commit fix to lightspeed-playbooks
+    GIT-->>AAP: project sync (git pull)
+    AAP->>AAP: ⚙️ Build HTTPD Remediation Template
+    AAP->>APP: 🔧✅ Execute HTTPD Remediation
+    APP-->>AAP: service healthy (probe/status check)
+    AAP->>PGV: embed incident + RCA + playbook + outcome
+    Note over PGV: next similar failure retrieves this precedent
 ```
+
+The same spine serves the OpenShift-native flows (UC-1..3) with
+Alertmanager webhooks or ArgoCD notifications replacing Kafka as the
+event source — see [USE_CASES.md](USE_CASES.md).
 
 ## Design decisions
 
@@ -98,13 +145,18 @@ sequenceDiagram
 | Operator versions | Pinned channel + startingCSV, `installPlanApproval: Manual` for upgrades | Reproducibility rule; no `latest` |
 | Delivery | ArgoCD app-of-apps in `gitops/config/apps/` | Existing openshift-gitops ArgoCD syncs this repo; bootstrap applies one file |
 | Terraform state | `s3://ai-demo-stack-tfstate` key `demo/aiops.tfstate` | Same backend, separate lifecycle (Q7) |
+| Generated-playbook VCS | In-cluster Gitea (`lightspeed-playbooks` repo) | Lab parity; keeps machine-generated playbooks out of this infra repo; zero external dependency |
+| Notifications | In-cluster Mattermost (Team Edition, Aurora `mattermost` DB) | Lab parity (Town Square channel); no external chat SaaS needed |
+| Demo failure target | Containerized `demo-httpd` instead of a RHEL VM | No VM infra on OCP; same httpd config-break scenario, probe-based verification |
 
 ## Namespaces created by this layer
 
 | Namespace | Contents |
 |-----------|----------|
 | `aap` | AAP operator, AutomationController, AutomationHub, EDA Controller |
-| `aiops-events` | Alertmanager webhook receiver, Kafka broker, event glue |
+| `aiops-events` | Kafka broker (KRaft), fluent-bit shipper config, Alertmanager webhook receiver |
+| `aiops-collab` | Gitea (lightspeed-playbooks repo), Mattermost (Town Square) |
+| `aiops-demo-app` | `demo-httpd` breakable demo workload |
 | `aiops-notebooks` | RHOAI workbench (Notebook CR), pipeline ConfigMaps |
 
 Base lessons baked in day-1: every non-default-UID pod gets an SA +

@@ -1,0 +1,35 @@
+---
+# UC-0 — the showroom lab's canonical trigger.
+# fluent-bit ships demo-httpd failure logs to Kafka; this rulebook
+# launches the Log Enrichment workflow. Activated at bootstrap by
+# playbooks/setup/seed-controller.yml.
+- name: React to httpd failures on the demo event bus
+  hosts: all
+  sources:
+    - ansible.eda.kafka:
+        host: kafka.aiops-events.svc
+        port: 9092
+        topic: aiops.demo.events
+
+  rules:
+    - name: httpd service failed
+      condition: >-
+        event.log is search("httpd.service. Failed", ignorecase=true) or
+        event.log is search("AH00", ignorecase=false) or
+        event.log is search("config test failed", ignorecase=true)
+      # One workflow per outage, not one per log line.
+      throttle:
+        once_within: 5 minutes
+        group_by_attributes:
+          - event.meta.source
+      action:
+        run_workflow_template:
+          name: "🚨 Log Enrichment and Prompt Generation"
+          organization: AIOps
+          job_args:
+            extra_vars:
+              incident_source: kafka
+              incident_kind: httpd-config
+              incident_namespace: aiops-demo-app
+              incident_subject: demo-httpd
+              incident_log: "{{ event.log | default(event) }}"

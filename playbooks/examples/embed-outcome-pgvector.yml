@@ -1,0 +1,41 @@
+---
+# Learning loop: record incident + action + outcome in the pgvector
+# `incidents` table (aiops DB in Aurora). Embeddings are backfilled by
+# the RHOAI notebook's re-embed pass — the EE stays model-free.
+# DB credentials come from the aiops-vector-db AAP credential (env).
+- name: Embed the remediation outcome into pgvector
+  hosts: localhost
+  gather_facts: false
+  vars:
+    db_host: "{{ lookup('ansible.builtin.env', 'PGHOST') }}"
+    db_name: "{{ lookup('ansible.builtin.env', 'PGDATABASE') | default('aiops', true) }}"
+    db_user: "{{ lookup('ansible.builtin.env', 'PGUSER') }}"
+    db_pass: "{{ lookup('ansible.builtin.env', 'PGPASSWORD') }}"
+  tasks:
+    - name: Insert the incident record
+      community.postgresql.postgresql_query:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_user }}"
+        login_password: "{{ db_pass }}"
+        db: "{{ db_name }}"
+        query: >-
+          INSERT INTO incidents
+            (source, kind, namespace, subject, raw, rca, remediation, outcome)
+          VALUES
+            ('aap', %(kind)s, %(ns)s, %(subject)s, %(raw)s::jsonb,
+             %(rca)s, %(remediation)s, %(outcome)s)
+        named_args:
+          kind: "{{ incident_kind | default('unknown') }}"
+          ns: "{{ incident_namespace | default('unknown') }}"
+          subject: "{{ incident_subject | default('unknown') }}"
+          raw: "{{ {'alert': alert | default({}), 'prompt': lightspeed_prompt | default(''),
+                    'playbook': generated_playbook_path | default('')} | to_json }}"
+          rca: "{{ incident_rca | default(none) }}"
+          remediation: "{{ remediation_action | default(generated_playbook_path | default('unknown')) }}"
+          outcome: "{{ remediation_outcome | default('unknown') }}"
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: >-
+          Incident recorded. The workbench re-embed pass will vectorize it;
+          the next similar event retrieves this precedent.

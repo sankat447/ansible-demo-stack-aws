@@ -1,0 +1,92 @@
+---
+# UC-1: pod crash-looping. Gather → precedent-aware analysis → bounded
+# remediation (image rollback / memory bump / annotated restart) → embed.
+- name: Remediate a crash-looping pod
+  hosts: localhost
+  gather_facts: false
+  vars:
+    max_memory_bump: 2 # never more than 2× the current limit
+  tasks:
+    - name: Get the pod
+      kubernetes.core.k8s_info:
+        kind: Pod
+        name: "{{ target_pod }}"
+        namespace: "{{ target_namespace }}"
+      register: pod
+
+    - name: Get its owning deployment (via ReplicaSet)
+      kubernetes.core.k8s_info:
+        kind: ReplicaSet
+        namespace: "{{ target_namespace }}"
+        name: "{{ pod.resources[0].metadata.ownerReferences[0].name }}"
+      register: rs
+      when: pod.resources | length > 0
+
+    - name: Classify the failure
+      ansible.builtin.set_fact:
+        deployment_name: "{{ rs.resources[0].metadata.ownerReferences[0].name }}"
+        last_state: "{{ pod.resources[0].status.containerStatuses[0].lastState | default({}) }}"
+        waiting_reason: "{{ pod.resources[0].status.containerStatuses[0].state.waiting.reason | default('') }}"
+
+    - name: Case OOMKilled — bump memory limit (bounded)
+      kubernetes.core.k8s_json_patch:
+        kind: Deployment
+        name: "{{ deployment_name }}"
+        namespace: "{{ target_namespace }}"
+        patch:
+          - op: replace
+            path: /spec/template/spec/containers/0/resources/limits/memory
+            value: "{{ ((pod.resources[0].spec.containers[0].resources.limits.memory | default('256Mi')
+                        | human_to_bytes) * max_memory_bump / 1048576) | int }}Mi"
+      when: last_state.terminated.reason | default('') == 'OOMKilled'
+      register: oom_fix
+
+    - name: Case bad image — roll back to the previous revision
+      ansible.builtin.command:
+        cmd: >-
+          oc rollout undo deployment/{{ deployment_name }}
+          -n {{ target_namespace }}
+      when:
+        - waiting_reason in ['ImagePullBackOff', 'ErrImagePull']
+      register: rollback_fix
+
+    - name: Otherwise — annotated restart (visible, auditable)
+      kubernetes.core.k8s:
+        state: patched
+        kind: Deployment
+        name: "{{ deployment_name }}"
+        namespace: "{{ target_namespace }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  aiops.demo/restarted-by: eda-remediate-pod-crashloop
+                  aiops.demo/restarted-at: "{{ now(utc=true).isoformat() }}"
+      when: oom_fix is skipped and rollback_fix is skipped
+
+    - name: Wait for the deployment to become available
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: "{{ deployment_name }}"
+        namespace: "{{ target_namespace }}"
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 300
+      register: verify
+      ignore_errors: true
+
+    - name: Publish outcome for the embedding step
+      ansible.builtin.set_stats:
+        data:
+          incident_kind: KubePodCrashLooping
+          incident_namespace: "{{ target_namespace }}"
+          incident_subject: "{{ target_pod }}"
+          remediation_action: >-
+            {{ 'memory-bump' if oom_fix is not skipped
+               else 'image-rollback' if rollback_fix is not skipped
+               else 'annotated-restart' }}
+          remediation_outcome: "{{ 'success' if verify is succeeded else 'escalated' }}"
+        per_host: false

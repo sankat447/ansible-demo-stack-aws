@@ -1,0 +1,58 @@
+---
+# Cross-cutting: ArgoCD app degraded/sync-failed → plain-English
+# "what changed and what broke" summary → Mattermost + embedding.
+- name: Report on a degraded/failed ArgoCD application
+  hosts: localhost
+  gather_facts: false
+  vars:
+    llm_endpoint: "{{ lightspeed_endpoint | default('http://lightspeed.aap.svc:8080') }}"
+    llm_model: "{{ llm_model_name | default('llama-3-1-8b') }}"
+    webhook_url: "{{ mattermost_webhook_url | default(lookup('ansible.builtin.env', 'MATTERMOST_WEBHOOK_URL')) }}"
+  tasks:
+    - name: Get the Application state
+      kubernetes.core.k8s_info:
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        name: "{{ argocd_app }}"
+        namespace: openshift-gitops
+      register: app
+
+    - name: Summarize via the LLM (through Portkey — lesson L4)
+      ansible.builtin.uri:
+        url: "{{ llm_endpoint }}/v1/chat/completions"
+        method: POST
+        body_format: json
+        timeout: 300
+        body:
+          model: "{{ llm_model }}"
+          max_tokens: 400
+          messages:
+            - role: user
+              content: |
+                Explain in plain English what changed and what broke for this
+                ArgoCD application. Be brief; end with one suggested action.
+                State: {{ argocd_state }}
+                Message: {{ argocd_message | default('n/a') }}
+                Status: {{ app.resources[0].status | default({}) | to_nice_json | truncate(4000) }}
+      register: summary
+
+    - name: Post to Mattermost
+      ansible.builtin.uri:
+        url: "{{ webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            📦 **GitOps Drift Report** — `{{ argocd_app }}` is **{{ argocd_state }}**
+            {{ summary.json.choices[0].message.content }}
+
+    - name: Publish for embedding
+      ansible.builtin.set_stats:
+        data:
+          incident_kind: "argocd-{{ argocd_state }}"
+          incident_namespace: openshift-gitops
+          incident_subject: "{{ argocd_app }}"
+          incident_rca: "{{ summary.json.choices[0].message.content }}"
+          remediation_action: report-only
+          remediation_outcome: escalated
+        per_host: false

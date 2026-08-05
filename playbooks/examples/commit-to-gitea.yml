@@ -1,0 +1,50 @@
+---
+# 🧾 Commit Fix to Gitea — Remediation workflow node 2.
+# Pushes the generated playbook into the lightspeed-playbooks repo via
+# the Gitea contents API (no git binary/workspace needed in the EE).
+# Gitea credentials come from the aiops-gitea AAP credential (injected
+# as GITEA_USERNAME / GITEA_PASSWORD env).
+- name: Commit the generated playbook to Gitea
+  hosts: localhost
+  gather_facts: false
+  vars:
+    gitea_url: "{{ gitea_api_url | default('http://gitea.aiops-collab.svc:3000') }}"
+    gitea_user: "{{ lookup('ansible.builtin.env', 'GITEA_USERNAME') }}"
+    gitea_pass: "{{ lookup('ansible.builtin.env', 'GITEA_PASSWORD') }}"
+    repo: "{{ gitea_user }}/lightspeed-playbooks"
+    file_path: "generated/{{ generated_playbook_name }}"
+  tasks:
+    - name: Guard — generated content must be present
+      ansible.builtin.assert:
+        that:
+          - generated_playbook_content is defined
+          - generated_playbook_name is defined
+        fail_msg: Run the 🧠 generator node first — no artifact found.
+
+    - name: Commit via the contents API
+      ansible.builtin.uri:
+        url: "{{ gitea_url }}/api/v1/repos/{{ repo }}/contents/{{ file_path }}"
+        method: POST
+        url_username: "{{ gitea_user }}"
+        url_password: "{{ gitea_pass }}"
+        force_basic_auth: true
+        body_format: json
+        status_code: [201]
+        body:
+          message: >-
+            🧠 Lightspeed fix for {{ incident_subject | default('demo-httpd') }}
+            ({{ lightspeed_prompt | default('') | truncate(80) }})
+          content: "{{ generated_playbook_content | b64encode }}"
+          branch: main
+      register: commit_result
+
+    - name: Publish commit info downstream
+      ansible.builtin.set_stats:
+        data:
+          generated_playbook_path: "{{ file_path }}"
+          gitea_commit_sha: "{{ commit_result.json.commit.sha | default('unknown') }}"
+        per_host: false
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: "Committed {{ file_path }} — the Lightspeed-Playbooks project sync node pulls it next."

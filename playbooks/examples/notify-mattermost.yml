@@ -1,0 +1,35 @@
+---
+# 📣 Notify via Mattermost — workflow node 3 (Log Enrichment).
+# Posts 🛑 raw failure logs and 🧠 AI RCA to Town Square (lab parity).
+# mattermost_webhook_url comes from the AAP custom credential created by
+# deploy.sh phase 5 — never hardcoded.
+- name: Notify the team in Mattermost
+  hosts: localhost
+  gather_facts: false
+  vars:
+    webhook_url: "{{ mattermost_webhook_url | default(lookup('ansible.builtin.env', 'MATTERMOST_WEBHOOK_URL')) }}"
+  tasks:
+    - name: Post raw failure logs
+      ansible.builtin.uri:
+        url: "{{ webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            🛑 **HTTPD Error Logs** — `{{ incident_subject | default('demo-httpd') }}` in `{{ incident_namespace | default('aiops-demo-app') }}`
+            ```
+            {{ failure_logs | default('(no logs captured)') | truncate(3000) }}
+            ```
+
+    - name: Post AI root-cause analysis
+      ansible.builtin.uri:
+        url: "{{ webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            🧠 **AI Insights (RCA)**
+            {{ incident_rca | default('(analysis unavailable)') }}
+
+            ➡️ Next: review the generation prompt on **🧠 Lightspeed Remediation Playbook Generator**, then launch it.
+      when: incident_rca is defined

@@ -1,0 +1,43 @@
+---
+# ⚙️ Build HTTPD Remediation Template — Remediation workflow node 4
+# (node 3 is the built-in Lightspeed-Playbooks project sync).
+# Creates 🔧✅ Execute HTTPD Remediation pointing at the playbook that
+# Lightspeed just committed.
+- name: Build the remediation job template
+  hosts: localhost
+  gather_facts: false
+  vars:
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
+    controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') }}"
+  module_defaults:
+    group/ansible.controller.controller:
+      host: "{{ controller_host }}"
+      username: "{{ controller_username }}"
+      password: "{{ controller_password }}"
+      validate_certs: false
+  tasks:
+    - name: Guard — need the committed playbook path
+      ansible.builtin.assert:
+        that: generated_playbook_path is defined
+        fail_msg: Run the commit node first — no playbook path artifact.
+
+    - name: Create/update the execution template
+      ansible.controller.job_template:
+        name: "🔧✅ Execute HTTPD Remediation"
+        organization: AIOps
+        project: lightspeed-playbooks
+        playbook: "{{ generated_playbook_path }}"
+        inventory: aiops-localhost
+        credentials:
+          - aiops-openshift
+        extra_vars:
+          target_namespace: "{{ incident_namespace | default('aiops-demo-app') }}"
+        ask_limit_on_launch: true
+        state: present
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: >-
+          🔧✅ Execute HTTPD Remediation is ready — launch it from the
+          controller UI to apply the Lightspeed-generated fix.

@@ -1,0 +1,168 @@
+# demo-httpd — the breakable workload (lab parity: RHEL webserver + httpd).
+#
+# The ❌ Break Apache job template corrupts demo.conf in the ConfigMap and
+# restarts the rollout; httpd then dies at startup. The httpd container
+# tees all output to a shared emptyDir file so the fluent-bit sidecar
+# still ships the failure logs to Kafka while the main container
+# crash-loops (a sidecar can't read another container's stdout).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-demo-app
+  labels:
+    app.kubernetes.io/part-of: aiops
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-httpd-config
+  namespace: aiops-demo-app
+  labels:
+    app: demo-httpd
+  annotations:
+    # The break/remediate playbooks rewrite this CM through the AAP flow;
+    # tell ArgoCD not to fight them (the demo IS the drift).
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+data:
+  demo.conf: |
+    # Managed by AAP demo workflows. `❌ Break Apache` injects an invalid
+    # directive here; the Lightspeed-generated playbook restores it.
+    ServerTokens Prod
+    Timeout 60
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-httpd-fluentbit
+  namespace: aiops-demo-app
+  labels:
+    app: demo-httpd
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1
+        Log_Level    info
+
+    [INPUT]
+        Name         tail
+        Path         /logs/httpd.log
+        Tag          httpd
+        Read_from_Head  false
+
+    [FILTER]
+        Name         grep
+        Match        httpd
+        Regex        log (error|Failed|failed|AH00)
+
+    [OUTPUT]
+        Name         kafka
+        Match        httpd
+        Brokers      kafka.aiops-events.svc:9092
+        Topics       aiops.demo.events
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-httpd
+  namespace: aiops-demo-app
+  labels:
+    app: demo-httpd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-httpd
+  template:
+    metadata:
+      labels:
+        app: demo-httpd
+    spec:
+      containers:
+        - name: httpd
+          # UBI httpd listens on 8080 and tolerates OpenShift's random UID.
+          # TODO first deploy: pin by digest (LESSONS_LEARNED A2)
+          image: registry.access.redhat.com/ubi9/httpd-24:latest
+          command:
+            - /bin/bash
+            - -c
+            # Config test first so a broken demo.conf fails loudly, then
+            # tee everything to the shared log the sidecar ships.
+            - |
+              set -o pipefail
+              if ! httpd -t 2>&1 | tee -a /logs/httpd.log; then
+                echo "httpd.service: Failed with result 'exit-code' (config test failed)" | tee -a /logs/httpd.log
+                sleep 10   # soften the crash loop; alert still fires
+                exit 1
+              fi
+              httpd -D FOREGROUND 2>&1 | tee -a /logs/httpd.log
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: demo-conf
+              mountPath: /etc/httpd/conf.d/demo.conf
+              subPath: demo.conf
+            - name: logs
+              mountPath: /logs
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+        - name: log-shipper
+          image: fluent/fluent-bit:3.1.9
+          volumeMounts:
+            - name: logs
+              mountPath: /logs
+            - name: fluentbit-conf
+              mountPath: /fluent-bit/etc/fluent-bit.conf
+              subPath: fluent-bit.conf
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+      volumes:
+        - name: demo-conf
+          configMap:
+            name: demo-httpd-config
+        - name: fluentbit-conf
+          configMap:
+            name: demo-httpd-fluentbit
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-httpd
+  namespace: aiops-demo-app
+  labels:
+    app: demo-httpd
+spec:
+  selector:
+    app: demo-httpd
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: demo-httpd
+  namespace: aiops-demo-app
+  labels:
+    app: demo-httpd
+spec:
+  to:
+    kind: Service
+    name: demo-httpd
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

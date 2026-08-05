@@ -28,8 +28,54 @@ These are baked into this repo's day-1 code — do not re-learn them.
 
 ## New lessons from this layer (AAP / EDA / Lightspeed / RHOAI)
 
-<!-- Populate as we build. Format:
-- **A<N> — Title.** What happened, why, and the rule going forward.
--->
-
-- *(none yet — populated during build)*
+- **A1 — Create Aurora logical DBs from inside the cluster.** The
+  operator workstation has AWS (SSM) and cluster-API access but no
+  network path into the Aurora VPC, so a `postgresql` Terraform
+  provider connection fails from a laptop. Pattern: Terraform reads
+  endpoint/master password from SSM → ships them as a K8s Secret → an
+  in-cluster psql Job applies idempotent SQL (`modules/aurora-db`).
+- **A2 — Pin images by digest at first deploy.** Operator CSVs are
+  pinned day-1, but the supporting images (kafka, gitea, mattermost,
+  fluent-bit, vector, ubi-httpd, psql) currently use version tags —
+  and one deliberate `latest` (ubi9/httpd-24). On the first successful
+  deploy, capture each running image's digest (`oc get pods -o
+  jsonpath=...imageID`) and pin it in the manifests. Marked with
+  `TODO first deploy` comments.
+- **A3 — Never target EDA activation pods directly.** Activation pod
+  labels/Services are an operator implementation detail and change
+  across AAP versions. Webhook producers (Alertmanager, ArgoCD
+  notifications) post to the stable event-bridge (Vector) instead,
+  which lands everything on Kafka topics EDA consumes. One transport,
+  no fragile selectors.
+- **A4 — Sealed-secrets gap.** The base stack's sealed-secrets status
+  was unverified at build time, so per the rules-of-engagement
+  fallback all secrets are raw K8s Secrets created by Terraform (state
+  lives in the encrypted S3 backend). If sealed-secrets exists on the
+  base cluster, migrate; if Vault-injector sidecar patterns are wanted
+  for AAP CR-managed pods, that needs AAP operator support — track
+  upstream.
+- **A5 — AAP CRs need a two-stage Terraform apply.** The
+  AutomationController/Hub/EDA CRDs only exist after the operator
+  installs, and OLM `Manual` approval means someone must approve the
+  InstallPlan. `deploy.sh` phases 1–3 handle target-apply →
+  approve+wait → full apply. A bare `terraform apply` on a fresh
+  cluster fails mid-plan-apply; that's expected, not a bug.
+- **A6 — AlertmanagerConfig assumes user alert routing is enabled.**
+  `monitoring.coreos.com/v1beta1 AlertmanagerConfig` in `aiops-events`
+  is only honored if the base monitoring stack enables user-defined
+  alert routing. If alerts never reach the bridge, that switch is a
+  BASE-repo change (openshift-monitoring config) — raise a PR there,
+  never patch it from this repo.
+- **A7 — Workflow artifacts are strings, not files.** AAP workflow
+  nodes run in separate pods; a file written to /tmp in the generator
+  node doesn't exist in the commit node. Pass the generated playbook
+  CONTENT through `set_stats` and write it via the Gitea contents API.
+- **A8 — Lightspeed "inline editor" integration is product-gated.**
+  True in-editor suggestions need the Lightspeed cloud service or the
+  VS Code plugin. Like the showroom lab itself, generation here is
+  driven through the 🧠 generator job template (survey = human-reviewed
+  prompt) hitting the lightspeed proxy → Portkey → llama-3-1-8b. Same
+  UX arc, no external service dependency.
+- **A9 (carried forward as L19) — `|| true` after tee pipelines** is
+  applied throughout deploy.sh/destroy.sh, with `PIPESTATUS[0]`
+  checked explicitly where the terraform/ansible exit code matters.

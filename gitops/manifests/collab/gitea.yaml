@@ -1,0 +1,202 @@
+# Gitea — in-cluster VCS for machine-generated playbooks (lab parity).
+# The repo `lightspeed-playbooks` is created by a PostSync hook Job;
+# admin credentials come from the Terraform-created `gitea-admin` Secret.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea
+  namespace: aiops-collab
+---
+# Lesson L1: gitea-rootless pins UID 1000.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-anyuid
+  namespace: aiops-collab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+subjects:
+  - kind: ServiceAccount
+    name: gitea
+    namespace: aiops-collab
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitea-data
+  namespace: aiops-collab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: gp3-csi
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: aiops-collab
+  labels:
+    app: gitea
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO volume
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+      annotations:
+        maistra.io/expose-route: "true" # lesson L2
+    spec:
+      serviceAccountName: gitea
+      containers:
+        - name: gitea
+          # TODO first deploy: pin by digest (LESSONS_LEARNED A2)
+          image: docker.io/gitea/gitea:1.22.3-rootless
+          env:
+            - name: GITEA__security__INSTALL_LOCK
+              value: "true"
+            - name: GITEA__server__ROOT_URL
+              value: https://gitea-aiops-collab.apps.ai-demo.iisdemolab.click
+            - name: GITEA__server__HTTP_PORT
+              value: "3000"
+            - name: GITEA__service__DISABLE_REGISTRATION
+              value: "true"
+            # SQLite on the PVC — Gitea holds only demo playbooks; no
+            # need for another Aurora logical DB.
+            - name: GITEA__database__DB_TYPE
+              value: sqlite3
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef: { name: gitea-admin, key: username }
+            - name: ADMIN_PASS
+              valueFrom:
+                secretKeyRef: { name: gitea-admin, key: password }
+          # Admin user must be created with the in-container CLI (the API
+          # requires an existing admin — chicken and egg). Idempotent:
+          # 'already exists' fails harmlessly into || true.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    sleep 15
+                    gitea admin user create --admin \
+                      --username "$ADMIN_USER" --password "$ADMIN_PASS" \
+                      --email aiops@local --must-change-password=false \
+                      || true
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/gitea
+            - name: data
+              mountPath: /etc/gitea
+              subPath: config
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            initialDelaySeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: gitea-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+  namespace: aiops-collab
+  labels:
+    app: gitea
+spec:
+  selector:
+    app: gitea
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: gitea
+  namespace: aiops-collab
+  labels:
+    app: gitea
+spec:
+  host: gitea-aiops-collab.apps.ai-demo.iisdemolab.click
+  to:
+    kind: Service
+    name: gitea
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+# PostSync hook: idempotently create the admin user + the
+# lightspeed-playbooks repo, seeded with a README.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-init
+  namespace: aiops-collab
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: gitea-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: registry.access.redhat.com/ubi9/ubi-minimal:9.4
+          env:
+            - name: GITEA_URL
+              value: http://gitea.aiops-collab.svc:3000
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef: { name: gitea-admin, key: username }
+            - name: ADMIN_PASS
+              valueFrom:
+                secretKeyRef: { name: gitea-admin, key: password }
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              echo "waiting for gitea..."
+              until curl -fsS "$GITEA_URL/api/healthz" >/dev/null 2>&1; do sleep 5; done
+              # Admin user is created by the gitea pod's postStart hook.
+
+              # Repo (idempotent: 409 already exists).
+              code=$(curl -s -o /tmp/out -w '%{http_code}' -X POST \
+                "$GITEA_URL/api/v1/user/repos" \
+                -H 'Content-Type: application/json' \
+                -u "$ADMIN_USER:$ADMIN_PASS" \
+                -d '{"name":"lightspeed-playbooks","description":"Machine-generated remediation playbooks (Ansible Lightspeed)","auto_init":true,"default_branch":"main"}')
+              echo "repo create: HTTP $code"
+              case "$code" in 201|409) exit 0;; *) cat /tmp/out; exit 1;; esac

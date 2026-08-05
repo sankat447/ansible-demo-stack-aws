@@ -6,6 +6,13 @@ platform (OpenShift 4.21 IPI on AWS + RHOAI). This repo adds four Red Hat
 automation components via Terraform + GitOps — it **attaches to** the base
 cluster and never modifies or re-deploys it.
 
+Built strictly to the objectives of the Red Hat showroom lab
+[**AI-Driven Ansible Automation**](https://rhpds.github.io/showroom-ai-driven-ansible-automation/modules/index.html):
+detect, analyze, and remediate application failures automatically —
+without manual playbook creation — on three pillars: **observability**
+(log collection → Kafka), **inference** (AI log analysis + Lightspeed
+playbook generation), and **automation** (AAP self-healing workflows).
+
 ## What this adds
 
 | # | Component | Purpose |
@@ -15,12 +22,22 @@ cluster and never modifies or re-deploys it.
 | 3 | **Ansible Lightspeed** | Playbook generation from natural language — via the self-hosted llama-3-1-8b through the Portkey AI gateway (or Red Hat Content Provider if a key is supplied) |
 | 4 | **RHOAI AIOps Workbench** | Jupyter workbench that embeds Prometheus alerts + pod events into pgvector, retrieves similar past incidents, and drafts incident summaries |
 
+Supporting cast (lab parity): single-broker **Kafka** + fluent-bit log
+shipper (observability pipeline), **Gitea** (version control for
+generated playbooks), **Mattermost** (incident notifications), and a
+breakable **demo-httpd** workload.
+
 ## The demo story
 
-Prometheus alert fires → EDA rulebook picks it up → EDA calls an AAP
-workflow → the workflow runs a Lightspeed-assisted remediation playbook →
-the outcome + context is embedded into pgvector via the RHOAI notebook
-pipeline → next time a similar event fires, EDA routes based on precedent.
+`❌ Break Apache` job breaks the demo httpd workload → error logs flow
+via fluent-bit → Kafka → an EDA rulebook picks them up → AAP's **Log
+Enrichment** workflow checks the service, has the self-hosted
+llama-3-1-8b (via Portkey) analyze the logs, posts the RCA to
+Mattermost, and drafts a Lightspeed prompt → a human reviews the prompt
+→ Lightspeed **generates** the remediation playbook → it's committed to
+Gitea, project-synced into AAP, and executed → service healthy → the
+whole incident is embedded into pgvector via the RHOAI notebook
+pipeline, so the next similar event routes on precedent.
 
 ## Quick start
 
@@ -50,11 +67,15 @@ See [ONBOARDING.md](ONBOARDING.md) for the full walkthrough.
 
 ```
 environments/demo/     Terraform root (backend, providers, module calls)
-modules/               aap-operator / eda-controller / lightspeed / event-sources
+modules/               aurora-db / aap-operator / lightspeed / event-sources /
+                       collab (Gitea+Mattermost) / rhoai-workbench
 gitops/config/apps/    ArgoCD Applications (app-of-apps pattern)
-playbooks/examples/    Demo remediation playbooks
-rulebooks/examples/    Demo EDA rulebooks
+gitops/manifests/      Kustomize bases the Applications sync
+playbooks/examples/    Demo + workflow playbooks (break, analyze, notify, …)
+playbooks/setup/       Seed configuration-as-code (controller, EDA, Keycloak)
+rulebooks/examples/    EDA rulebooks (Kafka, Alertmanager, ArgoCD)
 notebooks/             RHOAI AIOps workbench notebooks
+collections/           Pinned collection requirements
 docs/                  ARCHITECTURE, USE_CASES, LESSONS_LEARNED
 ```
 

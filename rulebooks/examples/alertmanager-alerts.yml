@@ -1,0 +1,63 @@
+---
+# UC-1/2/3 — platform alerts. Alertmanager posts to the event-bridge
+# webhook receiver, which lands them on Kafka topic `aiops.alerts`
+# (stable transport — see docs/LESSONS_LEARNED.md A3). Alert payloads
+# arrive in Alertmanager webhook format: {alerts: [{labels: ...}]}.
+- name: React to OpenShift platform alerts
+  hosts: all
+  sources:
+    - ansible.eda.kafka:
+        host: kafka.aiops-events.svc
+        port: 9092
+        topic: aiops.alerts
+
+  rules:
+    - name: Pod crash-looping (UC-1)
+      condition: event.alerts is defined and event.alerts[0].labels.alertname == "KubePodCrashLooping"
+      throttle:
+        once_within: 10 minutes
+        group_by_attributes:
+          - event.alerts[0].labels.namespace
+          - event.alerts[0].labels.pod
+      action:
+        run_job_template:
+          name: "remediate-pod-crashloop"
+          organization: AIOps
+          job_args:
+            extra_vars:
+              alert: "{{ event.alerts[0] }}"
+              target_namespace: "{{ event.alerts[0].labels.namespace }}"
+              target_pod: "{{ event.alerts[0].labels.pod }}"
+
+    - name: PVC filling up (UC-2)
+      condition: event.alerts is defined and event.alerts[0].labels.alertname == "KubePersistentVolumeFillingUp"
+      throttle:
+        once_within: 30 minutes
+        group_by_attributes:
+          - event.alerts[0].labels.namespace
+          - event.alerts[0].labels.persistentvolumeclaim
+      action:
+        run_job_template:
+          name: "expand-pvc"
+          organization: AIOps
+          job_args:
+            extra_vars:
+              alert: "{{ event.alerts[0] }}"
+              target_namespace: "{{ event.alerts[0].labels.namespace }}"
+              target_pvc: "{{ event.alerts[0].labels.persistentvolumeclaim }}"
+
+    - name: Node not ready (UC-3)
+      condition: event.alerts is defined and event.alerts[0].labels.alertname == "KubeNodeNotReady"
+      # Sustained-only: don't chase flapping nodes.
+      throttle:
+        once_within: 15 minutes
+        group_by_attributes:
+          - event.alerts[0].labels.node
+      action:
+        run_workflow_template:
+          name: "recover-node"
+          organization: AIOps
+          job_args:
+            extra_vars:
+              alert: "{{ event.alerts[0] }}"
+              target_node: "{{ event.alerts[0].labels.node }}"

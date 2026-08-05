@@ -1,0 +1,353 @@
+---
+# Controller + EDA configuration-as-code. Run by deploy.sh phase 5
+# (idempotent — safe to re-run). Builds everything the showroom lab
+# clicks together by hand: org, projects, credentials, the job
+# templates, both workflows, and the three rulebook activations.
+#
+# Required extra vars (deploy.sh passes them):
+#   controller_host / controller_username / controller_password
+#   eda_host
+#   gitea_username / gitea_password
+#   mattermost_webhook_url
+#   vector_db  { host, database, username, password }
+- name: Seed AAP Controller and EDA
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/ansible.controller.controller:
+      host: "{{ controller_host }}"
+      username: "{{ controller_username }}"
+      password: "{{ controller_password }}"
+      validate_certs: false
+  vars:
+    repo_url: https://github.com/sankat447/ansible-demo-stack-aws.git
+    gitea_repo_url: "http://gitea.aiops-collab.svc:3000/{{ gitea_username }}/lightspeed-playbooks.git"
+
+  tasks:
+    # ── Foundation ────────────────────────────────────────────────────
+    - name: Organization
+      ansible.controller.organization:
+        name: AIOps
+        description: AI-Driven Ansible Automation (showroom-lab-aligned)
+        state: present
+
+    - name: Localhost inventory
+      ansible.controller.inventory:
+        name: aiops-localhost
+        organization: AIOps
+        state: present
+
+    - name: Localhost host with local connection
+      ansible.controller.host:
+        name: localhost
+        inventory: aiops-localhost
+        variables:
+          ansible_connection: local
+          ansible_python_interpreter: "{{ '{{ ansible_playbook_python }}' }}"
+        state: present
+
+    # ── Credential types + credentials ────────────────────────────────
+    - name: Gitea credential type
+      ansible.controller.credential_type:
+        name: Gitea API
+        kind: cloud
+        inputs:
+          fields:
+            - id: username
+              type: string
+              label: Username
+            - id: password
+              type: string
+              label: Password
+              secret: true
+        injectors:
+          env:
+            GITEA_USERNAME: "{{ '{{ username }}' }}"
+            GITEA_PASSWORD: "{{ '{{ password }}' }}"
+        state: present
+
+    - name: Mattermost webhook credential type
+      ansible.controller.credential_type:
+        name: Mattermost Webhook
+        kind: cloud
+        inputs:
+          fields:
+            - id: webhook_url
+              type: string
+              label: Incoming webhook URL
+              secret: true
+        injectors:
+          env:
+            MATTERMOST_WEBHOOK_URL: "{{ '{{ webhook_url }}' }}"
+        state: present
+
+    - name: Vector DB credential type
+      ansible.controller.credential_type:
+        name: AIOps Vector DB
+        kind: cloud
+        inputs:
+          fields:
+            - id: host
+              type: string
+              label: Host
+            - id: database
+              type: string
+              label: Database
+            - id: username
+              type: string
+              label: Username
+            - id: password
+              type: string
+              label: Password
+              secret: true
+        injectors:
+          env:
+            PGHOST: "{{ '{{ host }}' }}"
+            PGDATABASE: "{{ '{{ database }}' }}"
+            PGUSER: "{{ '{{ username }}' }}"
+            PGPASSWORD: "{{ '{{ password }}' }}"
+        state: present
+
+    - name: Gitea credential
+      ansible.controller.credential:
+        name: aiops-gitea
+        organization: AIOps
+        credential_type: Gitea API
+        inputs:
+          username: "{{ gitea_username }}"
+          password: "{{ gitea_password }}"
+        state: present
+
+    - name: Mattermost credential
+      ansible.controller.credential:
+        name: aiops-mattermost
+        organization: AIOps
+        credential_type: Mattermost Webhook
+        inputs:
+          webhook_url: "{{ mattermost_webhook_url }}"
+        state: present
+
+    - name: Vector DB credential
+      ansible.controller.credential:
+        name: aiops-vector-db
+        organization: AIOps
+        credential_type: AIOps Vector DB
+        inputs: "{{ vector_db }}"
+        state: present
+
+    - name: Controller API credential (for template-building nodes)
+      ansible.controller.credential:
+        name: aiops-controller-api
+        organization: AIOps
+        credential_type: Red Hat Ansible Automation Platform
+        inputs:
+          host: "{{ controller_host }}"
+          username: "{{ controller_username }}"
+          password: "{{ controller_password }}"
+          verify_ssl: false
+        state: present
+
+    - name: In-cluster OpenShift credential
+      # Bearer token minted by deploy.sh for the aiops-automation SA.
+      ansible.controller.credential:
+        name: aiops-openshift
+        organization: AIOps
+        credential_type: OpenShift or Kubernetes API Bearer Token
+        inputs:
+          host: https://kubernetes.default.svc
+          bearer_token: "{{ openshift_sa_token }}"
+          verify_ssl: false
+        state: present
+      when: openshift_sa_token is defined
+
+    # ── Projects ──────────────────────────────────────────────────────
+    - name: This repo (demo content)
+      ansible.controller.project:
+        name: aiops-content
+        organization: AIOps
+        scm_type: git
+        scm_url: "{{ repo_url }}"
+        scm_branch: main
+        scm_update_on_launch: false
+        state: present
+
+    - name: Lightspeed-generated playbooks (Gitea)
+      ansible.controller.project:
+        name: lightspeed-playbooks
+        organization: AIOps
+        scm_type: git
+        scm_url: "{{ gitea_repo_url }}"
+        scm_branch: main
+        credential: aiops-gitea
+        scm_update_on_launch: true
+        state: present
+
+    # ── Job templates ─────────────────────────────────────────────────
+    - name: Standard job templates
+      ansible.controller.job_template:
+        name: "{{ item.name }}"
+        organization: AIOps
+        project: aiops-content
+        playbook: "{{ item.playbook }}"
+        inventory: aiops-localhost
+        credentials: "{{ item.credentials | default([]) }}"
+        extra_vars: "{{ item.extra_vars | default({}) }}"
+        state: present
+      loop:
+        - name: "❌ Break Apache"
+          playbook: playbooks/examples/break-httpd.yml
+          credentials: [aiops-openshift]
+        - name: "⚙️ Apache Service Status Check"
+          playbook: playbooks/examples/check-service-status.yml
+          credentials: [aiops-openshift]
+        - name: "🤖 AI: Analyze Incident"
+          playbook: playbooks/examples/analyze-incident-llm.yml
+        - name: "📣 Notify via Mattermost"
+          playbook: playbooks/examples/notify-mattermost.yml
+          credentials: [aiops-mattermost]
+        - name: "⚙️ Build Ansible Lightspeed Job Template"
+          playbook: playbooks/examples/build-lightspeed-template.yml
+          credentials: [aiops-controller-api]
+        - name: "🧾 Commit Fix to Gitea"
+          playbook: playbooks/examples/commit-to-gitea.yml
+          credentials: [aiops-gitea]
+        - name: "⚙️ Build HTTPD Remediation Template"
+          playbook: playbooks/examples/build-remediation-template.yml
+          credentials: [aiops-controller-api]
+        - name: remediate-pod-crashloop
+          playbook: playbooks/examples/remediate-pod-crashloop.yml
+          credentials: [aiops-openshift]
+        - name: expand-pvc
+          playbook: playbooks/examples/expand-pvc.yml
+          credentials: [aiops-openshift]
+        - name: gitops-drift-report
+          playbook: playbooks/examples/gitops-drift-report.yml
+          credentials: [aiops-openshift, aiops-mattermost]
+        - name: embed-outcome
+          playbook: playbooks/examples/embed-outcome-pgvector.yml
+          credentials: [aiops-vector-db]
+
+    - name: recover-node (workers only, one at a time)
+      ansible.controller.job_template:
+        name: recover-node
+        organization: AIOps
+        project: aiops-content
+        playbook: playbooks/examples/recover-node.yml
+        inventory: aiops-localhost
+        credentials: [aiops-openshift]
+        allow_simultaneous: false
+        state: present
+
+    # ── Workflow 1: 🚨 Log Enrichment and Prompt Generation ──────────
+    - name: Log Enrichment workflow
+      ansible.controller.workflow_job_template:
+        name: "🚨 Log Enrichment and Prompt Generation"
+        organization: AIOps
+        inventory: aiops-localhost
+        allow_simultaneous: false
+        ask_variables_on_launch: true
+        state: present
+
+    - name: Log Enrichment nodes (sequential, artifacts flow via set_stats)
+      ansible.controller.workflow_job_template_node:
+        workflow_job_template: "🚨 Log Enrichment and Prompt Generation"
+        identifier: "{{ item.id }}"
+        unified_job_template: "{{ item.jt }}"
+        success_nodes: "{{ item.next | default([]) }}"
+        organization: AIOps
+        state: present
+      loop:
+        - { id: status-check, jt: "⚙️ Apache Service Status Check", next: [analyze] }
+        - { id: analyze, jt: "🤖 AI: Analyze Incident", next: [notify] }
+        - { id: notify, jt: "📣 Notify via Mattermost", next: [build-generator] }
+        - { id: build-generator, jt: "⚙️ Build Ansible Lightspeed Job Template" }
+
+    # ── Workflow 2: 🛠️ Remediation ────────────────────────────────────
+    # Node 1 (the 🧠 generator) is created at runtime by workflow 1 with
+    # the incident-specific prompt; this workflow picks up from launch of
+    # that template (the human-reviewed survey) via its own nodes.
+    - name: Remediation workflow
+      ansible.controller.workflow_job_template:
+        name: "🛠️ Remediation"
+        organization: AIOps
+        inventory: aiops-localhost
+        allow_simultaneous: false
+        ask_variables_on_launch: true
+        survey_enabled: true
+        survey_spec:
+          name: Review the generation prompt
+          description: Human-in-the-loop checkpoint (lab's natural stopping point).
+          spec:
+            - type: textarea
+              question_name: "Lightspeed generation prompt (review & correct)"
+              variable: lightspeed_prompt
+              required: true
+        state: present
+
+    - name: Remediation generator template placeholder
+      # Ensures the workflow's first node resolves before workflow 1 has
+      # ever run (it will be overwritten with the incident prompt).
+      ansible.controller.job_template:
+        name: "🧠 Lightspeed Remediation Playbook Generator"
+        organization: AIOps
+        project: aiops-content
+        playbook: playbooks/examples/generate-playbook-lightspeed.yml
+        inventory: aiops-localhost
+        credentials: [aiops-gitea]
+        state: present
+
+    - name: Remediation nodes
+      ansible.controller.workflow_job_template_node:
+        workflow_job_template: "🛠️ Remediation"
+        identifier: "{{ item.id }}"
+        unified_job_template: "{{ item.jt }}"
+        success_nodes: "{{ item.next | default([]) }}"
+        organization: AIOps
+        state: present
+      loop:
+        - { id: generate, jt: "🧠 Lightspeed Remediation Playbook Generator", next: [commit] }
+        - { id: commit, jt: "🧾 Commit Fix to Gitea", next: [sync] }
+        - { id: sync, jt: lightspeed-playbooks, next: [build-remediation] } # project-sync node
+        - { id: build-remediation, jt: "⚙️ Build HTTPD Remediation Template", next: [embed] }
+        - { id: embed, jt: embed-outcome }
+
+    # ── EDA: decision environment, project, activations ───────────────
+    - name: EDA project
+      ansible.eda.project:
+        controller_host: "{{ eda_host }}"
+        controller_username: "{{ controller_username }}"
+        controller_password: "{{ controller_password }}"
+        validate_certs: false
+        name: aiops-rulebooks
+        url: "{{ repo_url }}"
+        state: present
+
+    - name: EDA decision environment
+      ansible.eda.decision_environment:
+        controller_host: "{{ eda_host }}"
+        controller_username: "{{ controller_username }}"
+        controller_password: "{{ controller_password }}"
+        validate_certs: false
+        name: aiops-de
+        # Default supported DE — pinned tag, not latest.
+        image_url: registry.redhat.io/ansible-automation-platform-25/de-supported-rhel9:1.0
+        state: present
+
+    - name: Rulebook activations (the three bootstrap listeners)
+      ansible.eda.rulebook_activation:
+        controller_host: "{{ eda_host }}"
+        controller_username: "{{ controller_username }}"
+        controller_password: "{{ controller_password }}"
+        validate_certs: false
+        name: "{{ item.name }}"
+        project_name: aiops-rulebooks
+        rulebook_name: "{{ item.rulebook }}"
+        decision_environment_name: aiops-de
+        organization_name: Default
+        awx_token_name: aiops-controller-token # created by deploy.sh
+        enabled: true
+        state: present
+      loop:
+        - { name: kafka-httpd-failure, rulebook: kafka-httpd-failure.yml }
+        - { name: alertmanager-alerts, rulebook: alertmanager-alerts.yml }
+        - { name: argocd-events, rulebook: argocd-events.yml }

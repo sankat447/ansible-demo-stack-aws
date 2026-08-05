@@ -1,0 +1,44 @@
+---
+# ❌ Break Apache — the demo detonator (lab parity).
+# Injects an invalid directive into the demo app's httpd config and
+# restarts the rollout. The container's config test then fails, failure
+# logs flow to Kafka, and the whole UC-0 chain fires.
+- name: Break the demo httpd workload
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_namespace: aiops-demo-app
+  tasks:
+    - name: Inject invalid Apache directive
+      kubernetes.core.k8s:
+        state: patched
+        kind: ConfigMap
+        name: demo-httpd-config
+        namespace: "{{ target_namespace }}"
+        definition:
+          data:
+            demo.conf: |
+              # BROKEN by ❌ Break Apache — the Lightspeed-generated
+              # playbook is expected to repair this.
+              ServerTokens Prod
+              Timeout 60
+              ThisIsNotAValidDirective on
+
+    - name: Restart the rollout so the bad config takes effect
+      kubernetes.core.k8s:
+        state: patched
+        kind: Deployment
+        name: demo-httpd
+        namespace: "{{ target_namespace }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  aiops.demo/broken-at: "{{ now(utc=true).isoformat() }}"
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: >-
+          demo-httpd is now broken. Watch Kafka topic aiops.demo.events,
+          then Mattermost Town Square for 🛑 logs and 🧠 AI RCA.

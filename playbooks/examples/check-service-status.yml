@@ -1,0 +1,51 @@
+---
+# ⚙️ Apache Service Status Check — workflow node 1 (Log Enrichment).
+# Confirms the failure and captures context for the AI analysis node.
+- name: Check demo service status and gather failure context
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_namespace: "{{ incident_namespace | default('aiops-demo-app') }}"
+    target_app: "{{ incident_subject | default('demo-httpd') }}"
+  tasks:
+    - name: Get pods for the app
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ target_namespace }}"
+        label_selectors:
+          - "app={{ target_app }}"
+      register: pods
+
+    - name: Read recent logs from the failing container
+      kubernetes.core.k8s_log:
+        namespace: "{{ target_namespace }}"
+        name: "{{ pods.resources[0].metadata.name }}"
+        container: httpd
+        previous: "{{ pods.resources[0].status.containerStatuses
+                      | selectattr('name', 'equalto', 'httpd')
+                      | map(attribute='restartCount') | first | int > 0 }}"
+        tail_lines: 200
+      register: httpd_logs
+      ignore_errors: true # a fully-crashed container may have no current logs
+
+    - name: Derive service state
+      ansible.builtin.set_fact:
+        service_failed: >-
+          {{ pods.resources | map(attribute='status.phase') | select('ne', 'Running') | list | length > 0
+             or pods.resources[0].status.containerStatuses
+                | selectattr('name', 'equalto', 'httpd')
+                | map(attribute='ready') | first == false }}
+
+    - name: Publish context to downstream workflow nodes
+      ansible.builtin.set_stats:
+        data:
+          incident_namespace: "{{ target_namespace }}"
+          incident_subject: "{{ target_app }}"
+          service_failed: "{{ service_failed }}"
+          failure_logs: "{{ httpd_logs.log | default(incident_log | default('no logs captured')) }}"
+        per_host: false
+
+    - name: Stop the workflow if the service is actually healthy
+      ansible.builtin.fail:
+        msg: Service is healthy — nothing to analyze (duplicate/expired event).
+      when: not service_failed
