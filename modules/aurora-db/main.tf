@@ -40,6 +40,9 @@ locals {
         END IF;
       END $$;
       ALTER ROLE ${name}_app WITH LOGIN PASSWORD '${random_password.app[name].result}';
+      -- Aurora master user is not superuser: it must be a member of a
+      -- role to create a database owned by it ("must be able to SET ROLE").
+      GRANT ${name}_app TO ${var.aurora_master_username};
       SELECT 'CREATE DATABASE ${name} OWNER ${name}_app'
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${name}')\gexec
     SQL
