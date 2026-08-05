@@ -12,6 +12,9 @@ LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 KUBECONFIG_DEFAULT="$HOME/GitHub/ai-demo-stack-aws/environments/demo/ocp-install-dir/ai-demo/auth/kubeconfig"
 export KUBECONFIG="${KUBECONFIG:-$KUBECONFIG_DEFAULT}"
+# Terraform's kubernetes/kubectl providers must use the SAME kubeconfig
+# as oc — the tfvars default may point at an expired install-dir file.
+export TF_VAR_kubeconfig_path="$KUBECONFIG"
 APPS_DOMAIN="apps.ai-demo.iisdemolab.click"
 
 banner() {

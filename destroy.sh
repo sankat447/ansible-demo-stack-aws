@@ -16,6 +16,7 @@ LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 KUBECONFIG_DEFAULT="$HOME/GitHub/ai-demo-stack-aws/environments/demo/ocp-install-dir/ai-demo/auth/kubeconfig"
 export KUBECONFIG="${KUBECONFIG:-$KUBECONFIG_DEFAULT}"
+export TF_VAR_kubeconfig_path="$KUBECONFIG" # keep providers on the same file as oc
 
 banner() {
   echo ""
